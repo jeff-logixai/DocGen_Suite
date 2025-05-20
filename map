@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Aeonix Map</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    html, body, #map { height: 100%; margin: 0; padding: 0; }
+    #debug-overlay {
+      position: absolute;
+      z-index: 9999;
+      top: 0;
+      left: 0;
+      width: 100%;
+      background: rgba(0, 0, 0, 0.85);
+      color: #0f0;
+      font-family: monospace;
+      font-size: 12px;
+      padding: 10px;
+      display: none;
+      white-space: pre-wrap;
+    }
+  </style>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"></script>
+</head>
+<body>
+<div id="debug-overlay"></div>
+<div id="map"></div>
+
+<script>
+  const showErrorOverlay = (msg) => {
+    const overlay = document.getElementById("debug-overlay");
+    overlay.textContent += msg + "\n";
+    overlay.style.display = "block";
+    console.error(msg);
+  };
+
+  window.onerror = function(message, source, lineno, colno, error) {
+    const stack = error?.stack || "";
+    showErrorOverlay(`[ERROR] ${message} at ${source}:${lineno}:${colno}\n${stack}`);
+  };
+
+  const RADAR_OPACITY_SOLO = 0.8;
+  const RADAR_OPACITY_WITH_ALERTS = 0.45;
+  const WARNING_FILL_OPACITY = 0.4;
+  const WATCH_FILL_OPACITY = 0.2;
+
+  let map = L.map('map').setView([39.5, -98.35], 4);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 18,
+    attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+
+  window.tornadoLayerGroup = L.layerGroup().addTo(map);
+  window.mlLayerVisible = true;
+
+  window.addTornadoTrackWithDeltas = function(lineCoords, dotCoords, color, label) {
+    try {
+      const grayColor = '#333333';
+      const line = L.polyline(lineCoords.map(p => [p[1], p[0]]), {
+        color: grayColor,
+        weight: 4,
+        opacity: 0.9
+      }).bindPopup(label).addTo(window.tornadoLayerGroup);
+
+      dotCoords.forEach(pt => {
+        const marker = L.circleMarker([pt.lat, pt.lon], {
+          radius: 3,
+          color: grayColor,
+          fillColor: grayColor,
+          fillOpacity: 1.0
+        });
+        let popup = `Lat: ${pt.lat.toFixed(4)}<br>Lon: ${pt.lon.toFixed(4)}`;
+        if (pt.hrrr && typeof pt.hrrr === 'object') {
+          Object.entries(pt.hrrr).forEach(([key, val]) => {
+            popup += `<br>${key}: ${val}`;
+          });
+        }
+        marker.bindPopup(popup).addTo(window.tornadoLayerGroup);
+      });
+    } catch (err) {
+      showErrorOverlay("addTornadoTrackWithDeltas error: " + err.message);
+    }
+  };
+
+  window.addCircle = function(lat, lon, radiusMeters, fillColor, borderColor, label) {
+    try {
+      L.circle([lat, lon], {
+        radius: radiusMeters,
+        color: borderColor,
+        fillColor: fillColor,
+        fillOpacity: 0.3,
+        weight: 1
+      }).bindPopup(label).addTo(window.tornadoLayerGroup);
+    } catch (err) {
+      showErrorOverlay("addCircle error: " + err.message);
+    }
+  };
+
+  window.clearTornadoTracks = function() {
+    window.tornadoLayerGroup.clearLayers();
+    console.log("[CLEAR] Tornado tracks cleared");
+  };
+
+  window.toggleMlLayer = function (visible) {
+    window.mlLayerVisible = visible;
+    if (!window.tornadoLayerGroup) return;
+    window.tornadoLayerGroup.eachLayer(layer => {
+      const color = layer.options?.color || layer.options?.fillColor;
+      if (color === '#333333') {
+        if (visible) {
+          layer.addTo(window.tornadoLayerGroup);
+        } else {
+          window.tornadoLayerGroup.removeLayer(layer);
+        }
+      }
+    });
+    console.log(`[ML TOGGLE] ML data layer visibility: ${visible}`);
+  };
+
+  // === Alerts ===
+  window.alertMarkerLayer = L.layerGroup().addTo(map);
+
+  window.addAlertPolygon = function(latlngs, type, label) {
+    try {
+      const fillColor = type === "watch" ? "yellow" : "red";
+      const fillOpacity = type === "watch" ? WATCH_FILL_OPACITY : WARNING_FILL_OPACITY;
+      const poly = L.polygon(latlngs, {
+        color: fillColor,
+        fillColor: fillColor,
+        fillOpacity,
+        weight: 2
+      }).bindPopup(label).addTo(window.alertMarkerLayer);
+    } catch (e) {
+      showErrorOverlay("addAlertPolygon error: " + e.message);
+    }
+  };
+
+  window.addAlertMarker = function(lat, lon, type, label) {
+    try {
+      const fillColor = type === "watch" ? "yellow" : "red";
+      const marker = L.circleMarker([lat, lon], {
+        radius: 6,
+        color: fillColor,
+        fillColor,
+        fillOpacity: 1.0,
+        weight: 1
+      }).bindPopup(label).addTo(window.alertMarkerLayer);
+    } catch (e) {
+      showErrorOverlay("addAlertMarker error: " + e.message);
+    }
+  };
+
+  window.clearAlertMarkers = function() {
+    try {
+      window.alertMarkerLayer.clearLayers();
+    } catch (e) {
+      showErrorOverlay("clearAlertMarkers error: " + e.message);
+    }
+  };
+
+  // === Radar ===
+  let radarLayer = null;
+  window.radarEnabled = true;
+
+  async function loadRadarLayer() {
+    try {
+      const response = await fetch("https://api.rainviewer.com/public/weather-maps.json");
+      const data = await response.json();
+      const latest = data.radar.past[data.radar.past.length - 1];
+      const timestamp = latest.time;
+
+      const tileUrl = `https://tilecache.rainviewer.com/v2/radar/${timestamp}/256/{z}/{x}/{y}/4/1_1.png`;
+      if (radarLayer) map.removeLayer(radarLayer);
+      radarLayer = L.tileLayer(tileUrl, { tileSize: 256, opacity: RADAR_OPACITY_SOLO, zIndex: 20 });
+      if (window.radarEnabled) radarLayer.addTo(map);
+    } catch (err) {
+      showErrorOverlay("Radar layer error: " + err.message);
+    }
+  }
+
+  function toggleRadarLayer(visible) {
+    window.radarEnabled = visible;
+    if (radarLayer) {
+      visible ? radarLayer.addTo(map) : map.removeLayer(radarLayer);
+    }
+    updateRadarOpacity();
+  }
+
+  function updateRadarOpacity() {
+    if (!radarLayer) return;
+    let hasOverlay = false;
+    try {
+      hasOverlay = Object.values(map._layers).some(layer =>
+        (typeof L.Circle !== 'undefined' && layer instanceof L.Circle) ||
+        (typeof L.CircleMarker !== 'undefined' && layer instanceof L.CircleMarker) ||
+        (typeof L.Polyline !== 'undefined' && layer instanceof L.Polyline)
+      );
+    } catch (e) {
+      showErrorOverlay("Opacity check failed: " + e.message);
+    }
+    radarLayer.setOpacity(hasOverlay ? RADAR_OPACITY_WITH_ALERTS : RADAR_OPACITY_SOLO);
+  }
+
+  loadRadarLayer();
+  setInterval(loadRadarLayer, 5 * 60 * 1000);
+  function drawStackedDots(lat, lon, colors) {
+      const radius = 6;
+      const spacing = 12;
+
+      colors.forEach((color, index) => {
+          const offsetLat = lat + (index * spacing * 0.00001); // vertical spacing
+          const circle = L.circleMarker([offsetLat, lon], {
+              radius: radius,
+              color: "#000",
+              weight: 1,
+              fillColor: color,
+              fillOpacity: 0.95
+          }).addTo(map);
+      });
+  }
+
+</script>
+</body>
+</html>
