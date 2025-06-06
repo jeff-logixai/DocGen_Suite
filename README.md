@@ -51,7 +51,8 @@ A planned documentation auditing tool that will analyze full EHR documents for q
   - OpenAI API (GPT-4)
   - `whisper`, `pyaudio`, `mutagen` (for VTT + audio parsing)
 
-### 📦 Getting Started
-
-1. Clone the repo:
+---
+### 📜 License
+This project is shared for demonstration and educational purposes only.  
+See [LICENSE.md](LICENSE.md) for full usage rights and restrictions.
 
